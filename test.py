@@ -4,6 +4,9 @@ from openai import OpenAI
 import os
 import logging
 from dotenv import load_dotenv
+import pathlib
+from PyPDF2 import PdfReader
+from docx import Document
 
 load_dotenv()
 
@@ -19,15 +22,17 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 model = "gpt-4o-mini"
 model_tts = "gpt-4o-mini-tts"
 OUTPUT_DIR = "speech_output"
+DOWNLOADS_PATH = str(pathlib.Path.home() / "Downloads")
 
 class RequestType(BaseModel):
     """Router LLM call: Dertermine if user wants to summarize or read text."""
     
-    request_type: Literal["summarize", "read", "unsupported"] = Field(
+    request_type: Literal["summarize", "read raw text", "unsupported", "read file and summary"] = Field(
         description="Type of request being made"
     ),
     confidence_score: float = Field(description="Confidence score between 0 and 1"),
     description: str = Field(description="Cleaned description of the request")
+    file_name: Optional[str] = Field(description="Name of the file if applicable")
 
 class Summarize(BaseModel):
     """Response model for text summarization."""
@@ -41,6 +46,13 @@ class TTS(BaseModel):
     raw_text: str = Field(description="Original text to be converted to speech")
     audio_content: bytes = Field(description="Audio content in bytes")
     audio_direction: Optional[str] = Field(description="Path to the saved audio file")
+
+class FileContent(BaseModel):
+    """Response model for file content reading."""
+    
+    file_name: str = Field(description="Name of the file intent reading")
+    content: str = Field(description="Content of the file")
+    summary: Optional[Summarize] = Field(description="Summary of the file content if applicable")
 
 class AgentResponse(BaseModel):
     """Response from the agent: either completed or needs more info."""
@@ -59,7 +71,7 @@ class AgentResponse(BaseModel):
         default=None,
         description="Summary text if summarization was performed"
     )
-    intent: Literal["summarize", "read", "unsupported"] = Field(
+    intent: Literal["summarize", "read raw text", "read file and summary", "unsupported"] = Field(
         description="The intent understood by the agent"
     )
 
@@ -75,9 +87,9 @@ def route_request(user_input: str) -> RequestType:
                 "role": "system",
                 "content": (
                     "You are an expert at classifying user requests into two categories: "
-                    "'summarize' for text summarization and 'read' for text-to-speech. "
+                    "'summarize' for text summarization, 'read raw text' for text-to-speech, 'read file and summary' for reading a file and summarizing its content, "
                     "Respond with a JSON object containing 'request_type', 'confidence_score', "
-                    "and 'description'."
+                    ", 'description' and 'file_name' if user request."
                 ),
             },
             {
@@ -129,6 +141,13 @@ user_input3 = """
 """
 route_request3 = route_request(user_input3)
 print(route_request3.request_type, route_request3.confidence_score, route_request3.description)
+
+# Input for Read file and summary
+user_input4 = """
+    Please read the file name test.pdf and provide a summary in about 50 words of its contents.
+"""
+route_request4 = route_request(user_input4)
+print(route_request4.request_type, route_request4.confidence_score, route_request4.description, route_request4.file_name)
 
 
 def handle_summarization(text: str, max_words: int = 50) -> Summarize:
@@ -251,6 +270,88 @@ tts_result = handle_tts(text_to_read)
 print("Text to Read:", tts_result.raw_text)
 print("Audio saved at:", tts_result.audio_direction)
 
+def find_file_in_downloads(filename: str) -> str:
+    """
+    Search for a file by name in the user's Downloads folder.
+    Returns the full path if found, otherwise raises FileNotFoundError.
+    """
+    for root, _, files in os.walk(DOWNLOADS_PATH):
+        for f in files:
+            if f.lower() == filename.lower():
+                return os.path.join(root, f)
+    raise FileNotFoundError(f"File '{filename}' not found in Downloads folder.")
+
+def read_file_content(filepath: str, max_chars: int = 8000) -> str:
+    """
+    Read text file safely (supports .txt, .md, .csv, .json, .pdf, .docx).
+    Truncates if too large to avoid overloading the model.
+    """
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"File not found: {filepath}")
+
+    ext = os.path.splitext(filepath)[1].lower()
+    supported_exts = [".txt", ".md", ".csv", ".json", ".pdf", ".docx"]
+    if ext not in supported_exts:
+        raise ValueError(f"Unsupported file type '{ext}'. Supported: {supported_exts}")
+
+    # --- Handle PDF ---
+    if ext == ".pdf":
+        text_content = ""
+        try:
+            reader = PdfReader(filepath)
+            for page in reader.pages:
+                page_text = page.extract_text() or ""
+                text_content += page_text
+                if len(text_content) > max_chars:
+                    text_content = text_content[:max_chars]
+                    break
+        except Exception as e:
+            raise ValueError(f"Error reading PDF: {e}")
+        return text_content.strip()
+
+    # --- Handle DOCX ---
+    if ext == ".docx":
+        text_content = ""
+        try:
+            doc = Document(filepath)
+            for para in doc.paragraphs:
+                text_content += para.text + "\n"
+                if len(text_content) > max_chars:
+                    text_content = text_content[:max_chars]
+                    break
+        except Exception as e:
+            raise ValueError(f"Error reading DOCX: {e}")
+        return text_content.strip()
+
+    # --- Handle Plain Text Files ---
+    with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+        content = f.read(max_chars)
+    return content.strip()
+
+def handle_read_file_and_summary(user_input: str, max_words: int = 50) -> FileContent:
+    """Handle reading a file and summarizing its content."""
+    logger.info("Handling read file and summary...")
+
+    # Extract file name from user input
+    route_result = route_request(user_input)
+    if not route_result.file_name:
+        raise ValueError("No file name provided in the user input.")
+
+    try:
+        filepath = find_file_in_downloads(route_result.file_name)
+        print(f"Found file at: {filepath}")
+        file_content = read_file_content(filepath)
+    except Exception as e:
+        logger.error(f"Error reading file: {e}")
+        raise
+
+    summary = handle_summarization(file_content, max_words=max_words)
+
+    return FileContent(
+        file_name=route_result.file_name,
+        content=file_content,
+        summary=summary
+    )
 
 def process_user_input(user_input: str) -> AgentResponse:
     """Process user input and return an appropriate AgentResponse."""
@@ -264,13 +365,21 @@ def process_user_input(user_input: str) -> AgentResponse:
             summary=summary,
             intent="summarize"
         )
-    elif route_result.request_type == "read" and route_result.confidence_score >= 0.7:
+    elif route_result.request_type == "read raw text" and route_result.confidence_score >= 0.7:
         tts = handle_tts(user_input)
         return AgentResponse(
             status="done",
             message="Text converted to speech successfully.",
             audio=tts,
-            intent="read"
+            intent="read raw text"
+        )
+    elif route_result.request_type == "read file and summary" and route_result.confidence_score >= 0.7:
+        read_file_and_summary = handle_read_file_and_summary(user_input)
+        return AgentResponse(
+            status="done",
+            message="File read and summarized successfully.",
+            summary=read_file_and_summary.summary,
+            intent="read file and summary"
         )
     else:
         return AgentResponse(
@@ -315,3 +424,14 @@ user_input3 = """
 """
 agentResponse3 = process_user_input(user_input3)
 print(agentResponse3.message)
+
+# Input for Read file and summary
+user_input4 = """
+    Please read the file name test.docx and provide a summary in about 50 words of its contents.
+"""
+agentResponse4 = process_user_input(user_input4)
+print(agentResponse4.message)
+if agentResponse4.summary:
+    print("Summary:", agentResponse4.summary.summary)
+    print("Original Text:", agentResponse4.summary.raw_text)
+
