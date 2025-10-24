@@ -198,7 +198,7 @@ text = """
     to ensure a healthy relationship between humans and machines.
 """
 
-summary_result = handle_summarization(text, max_words=50)
+summary_result = handle_summarization(text, max_words=20)
 print("Original Text:", summary_result.raw_text)
 print("Summary:", summary_result.summary)
 
@@ -361,7 +361,7 @@ def handle_read_file_and_summary(user_input: str, max_words: int = 50) -> FileCo
         )
     elif route_result.nth_file:
         try:
-            nth_file_info = get_nth_filename(route_result.nth_file)
+            nth_file_info = get_nth_file_info(route_result.nth_file)
             filepath = nth_file_info["full_path"]
             file_name = nth_file_info["file_name"]
             print(f"Found nth file at: {filepath}")
@@ -514,7 +514,7 @@ else:
     for i, f in enumerate(recent_pdfs, 1):
         print(f"{i}. {f['file_name']} - {f['modified_time'].strftime('%Y-%m-%d %H:%M:%S')}")
 
-def get_nth_filename(number: int) -> str:
+def get_nth_file_info(number: int) -> str:
     """Get the nth filename in the DOWNLOADS_PATH directory."""
     recent_files = find_recent_pdfs_in_downloads()
     if 0 < number <= len(recent_files):
