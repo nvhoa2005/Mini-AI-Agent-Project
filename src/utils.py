@@ -1,9 +1,11 @@
 import os
 from logger import logger
-from const import MODEL
+from const import MODEL, DOWNLOADS_PATH
 from client import client
+from datetime import datetime, timedelta
 
 model = MODEL
+
 
 def get_next_filename(output_dir: str) -> str:
     """
@@ -43,3 +45,45 @@ def return_text_to_speech(text: str) -> str:
         ]
     )
     return completion.choices[0].message.content.strip()
+
+def find_recent_pdfs_in_downloads(days: int = 7):
+    """
+    Find all PDF files in the Downloads folder within the last 'days' days.
+    Sort them by the most recent modification (or creation) time — the newest file first.
+    Return:
+    List[dict] — Each element includes:
+    {
+        "file_name": str,
+        "full_path": str,
+        "modified_time": datetime
+    }
+    """
+    recent_files = []
+    now = datetime.now()
+    cutoff_time = now - timedelta(days=days)
+
+    for root, _, files in os.walk(DOWNLOADS_PATH):
+        for f in files:
+            if f.lower().endswith(".pdf"):
+                file_path = os.path.join(root, f)
+                try:
+                    modified_time = datetime.fromtimestamp(os.path.getmtime(file_path))
+                    if modified_time >= cutoff_time:
+                        recent_files.append({
+                            "file_name": f,
+                            "full_path": file_path,
+                            "modified_time": modified_time
+                        })
+                except Exception as e:
+                    print(f"Error while accessing {file_path}: {e}")
+    recent_files.sort(key=lambda x: x["modified_time"], reverse=True)
+
+    return recent_files
+
+recent_pdfs = find_recent_pdfs_in_downloads()
+if not recent_pdfs:
+    print("Không có file PDF nào được tải xuống trong 7 ngày qua.")
+else:
+    print("📄 Các file PDF gần đây:")
+    for i, f in enumerate(recent_pdfs, 1):
+        print(f"{i}. {f['file_name']} - {f['modified_time'].strftime('%Y-%m-%d %H:%M:%S')}")

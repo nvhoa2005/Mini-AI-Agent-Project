@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 import pathlib
 from PyPDF2 import PdfReader
 from docx import Document
+from datetime import datetime, timedelta
 
 load_dotenv()
 
@@ -33,6 +34,7 @@ class RequestType(BaseModel):
     confidence_score: float = Field(description="Confidence score between 0 and 1"),
     description: str = Field(description="Cleaned description of the request")
     file_name: Optional[str] = Field(description="Name of the file if applicable")
+    nth_file: Optional[int] = Field(description="Nth file if applicable")
 
 class Summarize(BaseModel):
     """Response model for text summarization."""
@@ -89,7 +91,7 @@ def route_request(user_input: str) -> RequestType:
                     "You are an expert at classifying user requests into two categories: "
                     "'summarize' for text summarization, 'read raw text' for text-to-speech, 'read file and summary' for reading a file and summarizing its content, "
                     "Respond with a JSON object containing 'request_type', 'confidence_score', "
-                    ", 'description' and 'file_name' if user request."
+                    ", 'description', 'file_name' if user requests reading a file, and 'nth_file' if user requests reading the nth recent file. "
                 ),
             },
             {
@@ -147,7 +149,14 @@ user_input4 = """
     Please read the file name test.pdf and provide a summary in about 50 words of its contents.
 """
 route_request4 = route_request(user_input4)
-print(route_request4.request_type, route_request4.confidence_score, route_request4.description, route_request4.file_name)
+print(route_request4.request_type, route_request4.confidence_score, route_request4.description, route_request4.file_name, route_request4.nth_file)
+
+# Input for Read file and summary
+user_input5 = """
+    Please read the first pdf file and provide a summary in about 50 words of its contents.
+"""
+route_request5 = route_request(user_input5)
+print(route_request5.request_type, route_request5.confidence_score, route_request5.description, route_request5.file_name, route_request5.nth_file)
 
 
 def handle_summarization(text: str, max_words: int = 50) -> Summarize:
@@ -334,24 +343,40 @@ def handle_read_file_and_summary(user_input: str, max_words: int = 50) -> FileCo
 
     # Extract file name from user input
     route_result = route_request(user_input)
-    if not route_result.file_name:
-        raise ValueError("No file name provided in the user input.")
+    if route_result.file_name:
+        try:
+            filepath = find_file_in_downloads(route_result.file_name)
+            print(f"Found file at: {filepath}")
+            file_content = read_file_content(filepath)
+        except Exception as e:
+            logger.error(f"Error reading file: {e}")
+            raise
 
-    try:
-        filepath = find_file_in_downloads(route_result.file_name)
-        print(f"Found file at: {filepath}")
-        file_content = read_file_content(filepath)
-    except Exception as e:
-        logger.error(f"Error reading file: {e}")
-        raise
+        summary = handle_summarization(file_content, max_words=max_words)
 
-    summary = handle_summarization(file_content, max_words=max_words)
+        return FileContent(
+            file_name=route_result.file_name,
+            content=file_content,
+            summary=summary
+        )
+    elif route_result.nth_file:
+        try:
+            nth_file_info = get_nth_filename(route_result.nth_file)
+            filepath = nth_file_info["full_path"]
+            file_name = nth_file_info["file_name"]
+            print(f"Found nth file at: {filepath}")
+            file_content = read_file_content(filepath)
+        except Exception as e:
+            logger.error(f"Error reading nth file: {e}")
+            raise
 
-    return FileContent(
-        file_name=route_result.file_name,
-        content=file_content,
-        summary=summary
-    )
+        summary = handle_summarization(file_content, max_words=max_words)
+
+        return FileContent(
+            file_name=file_name,
+            content=file_content,
+            summary=summary
+        )
 
 def process_user_input(user_input: str) -> AgentResponse:
     """Process user input and return an appropriate AgentResponse."""
@@ -434,4 +459,68 @@ print(agentResponse4.message)
 if agentResponse4.summary:
     print("Summary:", agentResponse4.summary.summary)
     print("Original Text:", agentResponse4.summary.raw_text)
+
+# Input for Read file and summary
+user_input5 = """
+    Please read the first pdf file and provide a summary in about 50 words of its contents.
+"""
+agentResponse5 = process_user_input(user_input5)
+print(agentResponse5.message)
+if agentResponse5.summary:
+    print("Summary:", agentResponse5.summary.summary)
+    print("Original Text:", agentResponse5.summary.raw_text)
+
+
+## =======================================================
+def find_recent_pdfs_in_downloads(days: int = 7):
+    """
+    Find all PDF files in the Downloads folder within the last 'days' days.
+    Sort them by the most recent modification (or creation) time — the newest file first.
+    Return:
+    List[dict] — Each element includes:
+    {
+        "file_name": str,
+        "full_path": str,
+        "modified_time": datetime
+    }
+    """
+    recent_files = []
+    now = datetime.now()
+    cutoff_time = now - timedelta(days=days)
+
+    for root, _, files in os.walk(DOWNLOADS_PATH):
+        for f in files:
+            if f.lower().endswith(".pdf"):
+                file_path = os.path.join(root, f)
+                try:
+                    modified_time = datetime.fromtimestamp(os.path.getmtime(file_path))
+                    if modified_time >= cutoff_time:
+                        recent_files.append({
+                            "file_name": f,
+                            "full_path": file_path,
+                            "modified_time": modified_time
+                        })
+                except Exception as e:
+                    print(f"Error while accessing {file_path}: {e}")
+    recent_files.sort(key=lambda x: x["modified_time"], reverse=True)
+
+    return recent_files
+
+recent_pdfs = find_recent_pdfs_in_downloads()
+if not recent_pdfs:
+    print("Không có file PDF nào được tải xuống trong 7 ngày qua.")
+else:
+    print("📄 Các file PDF gần đây:")
+    for i, f in enumerate(recent_pdfs, 1):
+        print(f"{i}. {f['file_name']} - {f['modified_time'].strftime('%Y-%m-%d %H:%M:%S')}")
+
+def get_nth_filename(number: int) -> str:
+    """Get the nth filename in the DOWNLOADS_PATH directory."""
+    recent_files = find_recent_pdfs_in_downloads()
+    if 0 < number <= len(recent_files):
+        return recent_files[number - 1]
+    elif(number == 0):
+        return recent_files
+    else:
+        return recent_files[-1]
 
